@@ -26,15 +26,15 @@ The system is split into two parts:
    ════════════════════════════════           ═══════════════════════
 
    ┌──────────────┐                            ┌──────────────────┐
-   │ 1. RAW DATA  │                            │  7. GRADIO UI    │
+   │ 1. RAW DATA  │                            │  6. GRADIO UI    │
    │ (Kaggle CSV) │                            │  (end user)      │
    └──────┬───────┘                            └────────┬─────────┘
           │                                             │ transaction
           ▼                                             │ data
    ┌──────────────┐                                     ▼
    │ 2. EDA &     │                            ┌──────────────────┐
-   │ PREPROCESS   │                            │  6. FASTAPI      │
-   └──────┬───────┘                            │  BACKEND (REST)  │
+   │ PREPROCESS   │                            │  IN-PROCESS      │
+   └──────┬───────┘                            │  (no server)     │
           │                                     └────────┬─────────┘
           ▼                                             │
    ┌──────────────┐                                     ▼
@@ -46,7 +46,7 @@ The system is split into two parts:
    ┌──────────────┐         ┌──────────────┐   └────────┬─────────┘
    │ 4. TRAIN &   │────────▶│ MODEL        │            │
    │ COMPARE      │  save   │ ARTIFACTS    │◀───────────┘
-   │ (4 models)   │         │ (.pkl/.json) │   loads
+   │ (5 models)   │         │ (.pkl/.json) │   loads
    └──────────────┘         └──────────────┘
 ```
 
@@ -73,21 +73,22 @@ fraudguard/
 │   ├── scaler.pkl                  # StandardScaler (Amount, Time)
 │   ├── best_model.pkl              # winning model
 │   ├── model_metadata.json         # which model, threshold, metrics
-│   └── comparison_results.json     # 4-model results (shown in UI)
+│   └── comparison_results.json     # all-model results (shown in UI)
 │
 ├── src/
-│   ├── config.py                   # all settings (paths, thresholds)
+│   ├── config.py                   # all settings (paths, thresholds, selection)
 │   ├── data_loader.py              # load CSV, train/test split
 │   ├── preprocessing.py            # scaling, SMOTE
-│   ├── train.py                    # train 4 models + compare
+│   ├── train.py                    # train 5 models + compare (early stopping)
 │   ├── evaluate.py                 # metrics, plots
-│   └── predict.py                  # PredictionService (core logic)
+│   └── predict.py                  # FraudPredictor (core logic)
 │
-├── api/
-│   └── main.py                     # FastAPI application
+├── scripts/
+│   ├── generate_dataset.py         # realistic synthetic dataset generator
+│   └── train_and_push.py           # train, save weights, push to GitHub
 │
 ├── ui/
-│   └── app.py                      # Gradio interface
+│   └── app.py                      # Gradio interface (loads model in-process)
 │
 ├── tests/
 │   └── test_predict.py
@@ -179,20 +180,33 @@ yields 99.8% accuracy. Therefore:
 - **Precision** — "of those flagged as fraud, how many were correct" (reduces false
   blocks)
 - **Recall** — "of all real frauds, how many did we catch" (most important!)
-- **F1-score** — balance of the two
+- **F1-score** — balance of the two; **this is the metric we select the winner by**
+  (`config.SELECTION_METRIC = "f1"`), with PR-AUC and recall as tie-breakers, so the
+  chosen model is balanced rather than high-recall-but-unusable-precision
 - **PR-AUC** (Precision-Recall AUC) — more reliable than ROC-AUC on imbalanced data
 - **Confusion Matrix** — visual
 
+**Optimal training length (early stopping):** the XGBoost models train up to
+`XGB_MAX_ROUNDS` (1000) boosting rounds on an inner train split, but stop at the
+round with the best validation PR-AUC (`XGB_EARLY_STOPPING_ROUNDS` patience). The
+saved model is therefore the optimal size — neither under- nor over-trained.
+
+**Progress visibility:** training prints a `[i/5]` banner per model (which model,
+strategy, settings), streams XGBoost validation scores every N rounds, reports the
+best round, and times each model — so it is always clear what is training and how
+far it has progressed.
+
 **Saved artifacts:**
 - `best_model.pkl` — the winning model
-- `model_metadata.json` — `{"model": "XGBoost", "threshold": 0.5, "pr_auc": 0.87, ...}`
-- `comparison_results.json` — results of all 4 models (rendered as a table in the UI)
+- `model_metadata.json` — `{"model": "Random Forest", "selection_metric": "f1", ...}`
+- `comparison_results.json` — results of all models (rendered as a table in the UI)
 
 ---
 
 ## 6. 🎯 Layer 5 — Prediction Service (`predict.py`) — Heart of the System
 
-This is the most important module. Both the UI and the API call it.
+This is the most important module. The Gradio UI calls it **in-process** (loaded
+once into memory) — there is no API/HTTP hop.
 
 ```python
 class FraudPredictor:
@@ -223,43 +237,25 @@ fraud probability (p):
 > These thresholds can be tuned later based on metrics. Adding business logic is a
 > big plus for recruiters.
 
-**Returned response (JSON):**
+**Returned response (dict):**
 ```json
 {
   "is_fraud": true,
   "fraud_probability": 0.87,
   "risk_level": "HIGH",
   "decision": "BLOCK",
-  "model_used": "XGBoost"
+  "model_used": "Random Forest"
 }
 ```
 
 ---
 
-## 7. 🔌 Layer 6 — Backend (FastAPI, `api/main.py`)
+## 7. 🖥️ Layer 6 — Gradio UI (`ui/app.py`)
 
-**Endpoints:**
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/health` | is the system up (model loaded)? |
-| `POST` | `/predict` | one transaction -> prediction |
-| `GET` | `/model-info` | which model, its metrics |
-
-**`POST /predict` flow:**
-```
-1. Pydantic validates the request (V1..V28, Amount, Time present and numeric)
-2. FraudPredictor.predict() is called
-3. JSON response is returned
-```
-
-**Pydantic validation** — on invalid data, a clear error message (e.g. "Amount must
-be a number"). This makes the API professional and auto-generates Swagger docs at
-`/docs`.
-
----
-
-## 8. 🖥️ Layer 7 — Gradio UI (`ui/app.py`)
+The UI is **self-contained**: it imports `FraudPredictor` and scores transactions
+**in-process**. There is no separate API server, no HTTP, and nothing extra to
+launch — just `python ui/app.py`. Input is validated inside `FraudPredictor`
+(missing fields / non-numeric values raise a clear error shown in the UI).
 
 The UI is organized into **3 tabs**:
 
@@ -301,12 +297,12 @@ the test set with one click. This makes the UI easy and impressive to demo.
 - Upload a CSV → check multiple transactions at once
 - Results shown as a table
 
-**Gradio ↔ API connection:** the Gradio frontend calls the FastAPI backend over
-HTTP (`requests`), giving a true microservice split between frontend and backend.
+**In-process model:** the Gradio app imports `FraudPredictor` and scores
+transactions directly in the same process — no HTTP, no backend server to run.
 
 ---
 
-## 9. 🔄 End-to-End Real-Time Flow (UI data → result)
+## 8. 🔄 End-to-End Real-Time Flow (UI data → result)
 
 ```
 1. User clicks "🎲 Fraud sample" in the Gradio UI
@@ -319,27 +315,25 @@ HTTP (`requests`), giving a true microservice split between frontend and backend
 3. User clicks "🔍 CHECK"
         │
         ▼
-4. Gradio → HTTP POST → FastAPI /predict   (JSON sent)
+4. Gradio calls FraudPredictor.predict(transaction)   (in-process, no HTTP)
         │
         ▼
-5. FastAPI validates with Pydantic → FraudPredictor.predict()
+5. FraudPredictor:
+     a) validate fields (clear error if missing / non-numeric)
+     b) Amount & Time → scaler.transform()
+     c) model.predict_proba() → p = 0.87
+     d) decision logic → "BLOCK"
         │
         ▼
-6. FraudPredictor:
-     a) Amount & Time → scaler.transform()
-     b) model.predict_proba() → p = 0.87
-     c) decision logic → "BLOCK"
+6. Result dict → Gradio
         │
         ▼
-7. JSON response → Gradio
-        │
-        ▼
-8. UI renders nicely: 🛑 BLOCKED, 87%, HIGH risk
+7. UI renders nicely: 🛑 BLOCKED, 87%, HIGH risk
 ```
 
 ---
 
-## 10. 🛠️ Tech Stack
+## 9. 🛠️ Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
@@ -347,18 +341,17 @@ HTTP (`requests`), giving a true microservice split between frontend and backend
 | Data | pandas, numpy |
 | ML | scikit-learn, xgboost, imbalanced-learn (SMOTE) |
 | Storage | joblib (pkl), json |
-| Backend | FastAPI, uvicorn, pydantic |
-| UI | Gradio |
+| UI | Gradio (self-contained, loads the model in-process) |
 | Visualization | matplotlib, seaborn |
 | Testing | pytest |
 
 ---
 
-## 11. ✅ Agreed Scope Summary
+## 10. ✅ Agreed Scope Summary
 
 - Binary classification + probability (0–100%) + decision (Block / Review / Approve)
-- FastAPI REST API (separate backend)
-- Kaggle Credit Card Fraud dataset
-- Gradio UI for interactive testing
-- 4-model comparison: Logistic Regression, Random Forest, XGBoost, Isolation Forest
-- Imbalance handled by comparing class weights vs. SMOTE
+- Self-contained Gradio app (model loaded in-process — no separate API server)
+- Kaggle Credit Card Fraud dataset (or the realistic synthetic generator)
+- 5-model comparison: Logistic Regression, Random Forest, XGBoost
+  (scale_pos_weight + SMOTE, with early stopping), Isolation Forest
+- Winner selected by **F1** (balanced); imbalance handled via class weights vs. SMOTE

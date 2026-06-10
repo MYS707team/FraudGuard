@@ -2,8 +2,8 @@
 FraudGuard — Prediction service (heart of the system).
 
 ``FraudPredictor`` loads the scaler, best model and metadata once (cached in
-memory) and turns a raw transaction dict into a decision. Both the FastAPI
-backend and the Gradio UI ultimately rely on this class.
+memory) and turns a raw transaction dict into a decision. The Gradio UI relies
+on this class directly (in-process — there is no separate API server).
 
 Decision logic (fraud probability p):
     p < 0.30          -> APPROVE  (LOW risk)
@@ -127,7 +127,7 @@ class FraudPredictor:
         }
 
 
-# Module-level lazy singleton so the API/UI don't reload artifacts per request.
+# Module-level lazy singleton so the UI doesn't reload artifacts per request.
 _PREDICTOR: FraudPredictor | None = None
 
 

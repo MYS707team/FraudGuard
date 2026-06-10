@@ -217,3 +217,47 @@ All steps from `FraudGuard_promt.md` are complete: data → preprocessing → tr
 & comparison → evaluation → prediction service → FastAPI backend → bilingual
 Gradio UI → tests → Colab notebook. The project runs end-to-end locally and in
 Google Colab, and was pushed to the `main` branch.
+
+
+---
+
+## STEP 11 — Realistic dataset, train-&-push, public UI ✅
+
+**What was done:**
+- `scripts/generate_dataset.py`: generates a large, realistic synthetic dataset
+  (real Kaggle schema, PCA-like features, ~0.17% fraud) so the pipeline trains
+  out-of-the-box without the proprietary CSV.
+- `scripts/train_and_push.py`: one shell command to train, save weights/plots, and
+  commit + push the trained artifacts to GitHub.
+- Gradio UI now defaults to a public `*.gradio.live` share link
+  (`FRAUDGUARD_SHARE=true`).
+
+---
+
+## STEP 12 — Optimal selection, early stopping, progress, no server ✅
+
+**Prompt:** Fix the evaluation/model selection so the *optimal* model wins, make
+training stop at the optimal point, show clear training progress, and remove the
+API server.
+
+**What was done:**
+- **Balanced model selection:** the winner is now chosen by **F1**
+  (`config.SELECTION_METRIC`), with PR-AUC then recall as tie-breakers. This
+  replaces ranking by PR-AUC alone, which crowned Logistic Regression despite ~13%
+  precision; F1 favors a balanced model (e.g. Random Forest).
+- **Early stopping:** the two XGBoost models train up to `XGB_MAX_ROUNDS` (1000) on
+  an inner validation split carved from train, stopping at the best validation
+  PR-AUC (`XGB_EARLY_STOPPING_ROUNDS` patience). The saved model is the optimal
+  size, and `best_round` is recorded in the metrics.
+- **Clear progress:** each model prints a `[i/5]` banner (which model + strategy +
+  settings), XGBoost streams validation scores every N rounds and reports its best
+  round, Random Forest / Isolation Forest log build progress, and every model is
+  timed.
+- **Removed the server:** deleted `api/` (FastAPI). The Gradio UI now loads the
+  model **in-process** via `FraudPredictor` — no HTTP, no backend to run. Dropped
+  `fastapi`, `uvicorn`, `pydantic`, and `requests` from `requirements.txt`.
+- Updated the Colab notebook (no API cell), README, and architecture doc to match
+  the self-contained design.
+
+**Verified:** full training run shows progress + early stopping and selects the
+balanced best model; `pytest` passes; the UI imports/compiles with no API.

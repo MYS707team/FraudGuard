@@ -4,19 +4,26 @@ Real-time credit-card fraud detection system. It scores each transaction with a
 machine-learning model, returns a fraud probability (0–100%), and makes an
 automated decision: **Approve**, **Review**, or **Block**.
 
-The UI is **bilingual (English / O‘zbek)** and the whole project can be run end-to-end
-in **Google Colab**.
+The UI is **bilingual (English / O‘zbek)**, **self-contained** (no separate API
+server), and the whole project can be run end-to-end in **Google Colab**.
 
 ---
 
 ## ✨ Features
 
-- **Four models compared**: Logistic Regression, Random Forest, XGBoost (with
+- **Five candidates compared**: Logistic Regression, Random Forest, XGBoost (with
   `scale_pos_weight` and a SMOTE variant), and Isolation Forest (unsupervised).
-- **Imbalance-aware**: ranked by **PR-AUC** (not accuracy) — on a dataset that is
-  ~99.8% non-fraud, accuracy is misleading.
-- **Microservice design**: a FastAPI backend serves predictions; the Gradio UI
-  talks to it over HTTP.
+- **Optimal model selection**: the winner is chosen by **F1** — a *balanced*
+  metric that rewards catching fraud (recall) without flooding analysts with
+  false positives (precision). PR-AUC / recall are tie-breakers. (Accuracy is
+  intentionally not used — on data that is ~99.8% non-fraud it is misleading.)
+- **Early stopping**: the XGBoost models train up to 1000 boosting rounds but stop
+  at the round with the best validation PR-AUC, so the saved model is the optimal
+  size — never over- or under-trained.
+- **Clear training progress**: each model prints a `[i/5]` banner showing which
+  model is training, live validation scores for XGBoost, and per-model timing.
+- **Self-contained UI**: the Gradio app loads the model in-process — no backend
+  server to run.
 - **Bilingual UI**: switch between English and Uzbek at runtime.
 - **Reproducible**: fixed random seeds, scaler fit on training data only (no leakage).
 
@@ -26,16 +33,18 @@ in **Google Colab**.
 
 ```
 FraudGuard/
-├── api/main.py            # FastAPI backend (/health, /predict, /model-info)
-├── ui/app.py              # Gradio UI (bilingual EN/UZ, 3 tabs)
+├── ui/app.py              # Gradio UI (bilingual EN/UZ, 3 tabs, in-process model)
 ├── src/
-│   ├── config.py          # paths, thresholds, feature schema
+│   ├── config.py          # paths, thresholds, selection metric, XGB settings
 │   ├── data_loader.py     # load CSV, stratified train/test split
 │   ├── preprocessing.py   # scaler (train-only fit), SMOTE, class weights
 │   ├── anomaly.py         # Isolation Forest -> predict_proba adapter
-│   ├── train.py           # train + compare 4 models, save best
+│   ├── train.py           # train + compare models, early stopping, save best
 │   ├── evaluate.py        # confusion matrix, PR curve, comparison table
 │   └── predict.py         # FraudPredictor: transaction -> decision
+├── scripts/
+│   ├── generate_dataset.py  # synthetic, realistic dataset generator
+│   └── train_and_push.py    # train, save weights, commit & push to GitHub
 ├── tests/test_predict.py  # unit tests (no dataset needed)
 ├── notebooks/FraudGuard_Colab.ipynb   # one-click Colab runner
 ├── data/{raw,processed}/  # dataset & processed arrays (git-ignored)
@@ -50,13 +59,8 @@ FraudGuard/
 1. Open `notebooks/FraudGuard_Colab.ipynb` in
    [Google Colab](https://colab.research.google.com/).
 2. Run the cells top-to-bottom. They will:
-   clone the repo → install deps → download the dataset → train → launch the API
-   and the bilingual UI with a public `*.gradio.live` link.
-
-The dataset is the Kaggle
-[Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
-dataset. The notebook supports both the Kaggle API (`kaggle.json`) and manual
-CSV upload.
+   clone the repo → install deps → get the dataset → train → launch the
+   bilingual UI with a public `*.gradio.live` link.
 
 ---
 
@@ -66,56 +70,30 @@ CSV upload.
 # 1. Install
 pip install -r requirements.txt
 
-# 2. Add the dataset
-#    Download creditcard.csv from Kaggle and place it in data/raw/
+# 2. Get the dataset
+#    A realistic synthetic dataset is generated automatically by the training
+#    script if data/raw/creditcard.csv is missing. To use the real Kaggle data,
+#    download creditcard.csv into data/raw/ instead:
 #    https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
 
 # 3. Train (creates models/best_model.pkl, scaler.pkl, metadata, plots)
 python -m src.train
+#    ...or train, save weights, and push them to GitHub in one go:
+python scripts/train_and_push.py
 
-# 4. Start the API (Swagger docs at http://localhost:8000/docs)
-uvicorn api.main:app --port 8000
-
-# 5. In another terminal, start the UI (http://localhost:7860)
+# 4. Start the self-contained UI (public *.gradio.live link printed in the console)
 python ui/app.py
 ```
 
-The UI reads the backend URL from the `FRAUDGUARD_API_URL` environment variable
-(default `http://localhost:8000`). To expose a public link locally, set
-`FRAUDGUARD_SHARE=true`.
+The UI creates a public shareable link by default. Set `FRAUDGUARD_SHARE=false`
+to keep it local-only, and `FRAUDGUARD_UI_PORT` to change the port (default 7860).
 
 ---
 
-## 🔌 API
+## 🤖 Models & decision logic
 
-| Method | Endpoint      | Description                                  |
-|--------|---------------|----------------------------------------------|
-| GET    | `/health`     | Service status + whether the model is loaded |
-| POST   | `/predict`    | Score a transaction → fraud decision         |
-| GET    | `/model-info` | Winning model name + metrics                 |
-
-**Example request:**
-
-```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{"Time":0,"V1":0,"V2":0,"V3":0,"V4":0,"V5":0,"V6":0,"V7":0,"V8":0,"V9":0,
-       "V10":0,"V11":0,"V12":0,"V13":0,"V14":0,"V15":0,"V16":0,"V17":0,"V18":0,
-       "V19":0,"V20":0,"V21":0,"V22":0,"V23":0,"V24":0,"V25":0,"V26":0,"V27":0,
-       "V28":0,"Amount":149.62}'
-```
-
-**Example response:**
-
-```json
-{
-  "is_fraud": false,
-  "fraud_probability": 0.0123,
-  "risk_level": "LOW",
-  "decision": "APPROVE",
-  "model_used": "XGBoost"
-}
-```
+The training pipeline scores every model on the untouched test set and reports
+**Precision / Recall / F1 / PR-AUC**, then selects the best by **F1**.
 
 ### Decision thresholds
 
@@ -126,6 +104,18 @@ curl -X POST http://localhost:8000/predict \
 | `p ≥ 0.70`            | BLOCK     | HIGH   |
 
 (Configurable in `src/config.py`.)
+
+The prediction payload returned by `FraudPredictor.predict()`:
+
+```json
+{
+  "is_fraud": false,
+  "fraud_probability": 0.0123,
+  "risk_level": "LOW",
+  "decision": "APPROVE",
+  "model_used": "Random Forest"
+}
+```
 
 ---
 

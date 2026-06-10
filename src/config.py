@@ -63,6 +63,31 @@ BLOCK_ABOVE: float = 0.70
 DEFAULT_THRESHOLD: float = 0.50
 
 # --------------------------------------------------------------------------- #
+# Model selection
+# --------------------------------------------------------------------------- #
+# Which metric decides the "best" model. We use F1 (the harmonic mean of
+# precision & recall) so the winner is *balanced* — it must both catch fraud
+# (recall) AND avoid drowning analysts in false positives (precision). Ranking by
+# PR-AUC alone can crown a model with great ranking but unusable precision at the
+# operating threshold (e.g. Logistic Regression at 13% precision).
+# Tie-breakers are applied in order after the primary metric.
+SELECTION_METRIC: str = "f1"
+SELECTION_TIEBREAKERS: tuple[str, ...] = ("pr_auc", "recall")
+
+# --------------------------------------------------------------------------- #
+# XGBoost training — early stopping (stop at the optimal number of rounds)
+# --------------------------------------------------------------------------- #
+# Instead of always training a fixed number of boosting rounds, XGBoost trains up
+# to XGB_MAX_ROUNDS but stops as soon as the validation PR-AUC stops improving for
+# XGB_EARLY_STOPPING_ROUNDS consecutive rounds — keeping the optimal-sized model.
+VALIDATION_SIZE: float = 0.2          # inner split carved from TRAIN for early stop
+XGB_MAX_ROUNDS: int = 1000            # upper bound on boosting rounds
+XGB_EARLY_STOPPING_ROUNDS: int = 30   # stop after N rounds without improvement
+XGB_LEARNING_RATE: float = 0.1
+XGB_MAX_DEPTH: int = 5
+XGB_VERBOSE_EVERY: int = 25           # log validation score every N rounds
+
+# --------------------------------------------------------------------------- #
 # Feature schema
 # --------------------------------------------------------------------------- #
 # The exact column order expected by the dataset and the model.

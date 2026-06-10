@@ -3,12 +3,14 @@ FraudGuard — Gradio UI (bilingual: English / O'zbek).
 
 Three tabs:
   1. Check a Transaction  — single transaction scoring with random-sample loaders.
-  2. Model Results        — 4-model comparison table + confusion matrix.
+  2. Model Results        — model comparison table + confusion matrix.
   3. Batch Check          — upload a CSV and score every row.
 
-Microservice style: this UI talks to the FastAPI backend over HTTP (``requests``).
-It never imports the model directly. Configure the backend URL with the
-``FRAUDGUARD_API_URL`` environment variable (default: http://localhost:8000).
+This is a **self-contained app**: there is no separate API/server. The UI loads
+the trained model in-process via ``src.predict.FraudPredictor`` and scores
+transactions directly. Train the model first with::
+
+    python scripts/train_and_push.py        # or: python -m src.train
 """
 from __future__ import annotations
 
@@ -23,11 +25,9 @@ import os
 
 import gradio as gr
 import pandas as pd
-import requests
 
 from src import config
-
-API_URL = os.environ.get("FRAUDGUARD_API_URL", "http://localhost:8000").rstrip("/")
+from src.predict import FraudPredictor
 
 V_COLUMNS = config.V_FEATURES  # V1..V28
 
@@ -52,17 +52,19 @@ T = {
         "btn_check": "🔍 CHECK",
         "result": "### Result",
         "results_heading": "## 📊 Model Comparison",
-        "results_desc": "Four models compared on the untouched test set "
-        "(ranked by PR-AUC; accuracy is intentionally not used on imbalanced data).",
+        "results_desc": "Models compared on the untouched test set "
+        "(winner chosen by F1 — balanced precision & recall; accuracy is "
+        "intentionally not used on imbalanced data).",
         "cm_heading": "### Confusion matrix (best model)",
         "batch_heading": "## 📈 Batch Check",
         "batch_desc": "Upload a CSV with columns Time, V1..V28, Amount. "
         "Each row is scored and shown below.",
         "batch_upload": "Upload CSV",
         "btn_batch": "▶️ Run batch check",
-        "api_down": "⚠️ Backend not reachable at {url}. Start the API first.",
+        "model_missing": "⚠️ Model not trained yet. Run "
+        "`python scripts/train_and_push.py` (or `python -m src.train`) first.",
         "no_samples": "⚠️ Raw dataset not found, filled with zeros. "
-        "Download creditcard.csv into data/raw/ for real samples.",
+        "Add creditcard.csv to data/raw/ for real samples.",
         "decision": "Decision",
         "fraud_prob": "Fraud probability",
         "risk": "Risk level",
@@ -85,17 +87,19 @@ T = {
         "btn_check": "🔍 TEKSHIRISH",
         "result": "### Natija",
         "results_heading": "## 📊 Modellar taqqoslanishi",
-        "results_desc": "To'rt model sinov to'plamida taqqoslangan "
-        "(PR-AUC bo'yicha tartiblangan; nomutanosib ma'lumotda aniqlik ishlatilmaydi).",
+        "results_desc": "Modellar sinov to'plamida taqqoslangan "
+        "(g'olib F1 bo'yicha — aniqlik va to'liqlik muvozanati; nomutanosib "
+        "ma'lumotda accuracy ishlatilmaydi).",
         "cm_heading": "### Chalkashlik matritsasi (eng yaxshi model)",
         "batch_heading": "## 📈 Ommaviy tekshiruv",
         "batch_desc": "Time, V1..V28, Amount ustunli CSV yuklang. "
         "Har bir qator baholanadi va quyida ko'rsatiladi.",
         "batch_upload": "CSV yuklash",
         "btn_batch": "▶️ Ommaviy tekshiruvni boshlash",
-        "api_down": "⚠️ Backend {url} manzilida ishlamayapti. Avval API'ni ishga tushiring.",
+        "model_missing": "⚠️ Model hali o'qitilmagan. Avval "
+        "`python scripts/train_and_push.py` (yoki `python -m src.train`) ni ishga tushiring.",
         "no_samples": "⚠️ Xom ma'lumotlar topilmadi, nollar bilan to'ldirildi. "
-        "Haqiqiy namunalar uchun creditcard.csv ni data/raw/ ichiga yuklang.",
+        "Haqiqiy namunalar uchun creditcard.csv ni data/raw/ ichiga qo'ying.",
         "decision": "Qaror",
         "fraud_prob": "Firibgarlik ehtimoli",
         "risk": "Xavf darajasi",
@@ -117,7 +121,26 @@ RISK_LABELS = {
 
 
 # --------------------------------------------------------------------------- #
-# Sample loading (raw, unscaled values so the API can scale them correctly)
+# In-process predictor (lazy singleton — loaded once, kept in memory)
+# --------------------------------------------------------------------------- #
+_PREDICTOR: FraudPredictor | None = None
+_PREDICTOR_ERROR: str | None = None
+
+
+def _get_predictor() -> FraudPredictor | None:
+    """Load the trained model once. Returns None if artifacts are missing."""
+    global _PREDICTOR, _PREDICTOR_ERROR
+    if _PREDICTOR is None and _PREDICTOR_ERROR is None:
+        try:
+            _PREDICTOR = FraudPredictor()
+        except FileNotFoundError as exc:
+            _PREDICTOR_ERROR = str(exc)
+            print(f"[FraudGuard UI] Model not loaded: {exc}")
+    return _PREDICTOR
+
+
+# --------------------------------------------------------------------------- #
+# Sample loading (raw, unscaled values; the predictor scales them correctly)
 # --------------------------------------------------------------------------- #
 _SAMPLE_CACHE: dict | None = None
 
@@ -155,14 +178,8 @@ def _sample_row(kind: str):
 
 
 # --------------------------------------------------------------------------- #
-# API calls
+# Result rendering
 # --------------------------------------------------------------------------- #
-def _call_predict(payload: dict) -> dict:
-    resp = requests.post(f"{API_URL}/predict", json=payload, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
-
-
 def _result_html(res: dict, lang: str) -> str:
     dec = res["decision"]
     info = DECISION_LABELS[dec]
@@ -187,14 +204,18 @@ def _result_html(res: dict, lang: str) -> str:
 
 
 def check_transaction(lang, amount, time_val, *v_values):
-    """Build payload, call API, return result HTML."""
+    """Build the transaction, score it in-process, return result HTML."""
+    predictor = _get_predictor()
+    if predictor is None:
+        return f"<p style='color:#dc2626'>{T[lang]['model_missing']}</p>"
+
     payload = {"Time": float(time_val), "Amount": float(amount)}
     for name, val in zip(V_COLUMNS, v_values):
         payload[name] = float(val)
     try:
-        res = _call_predict(payload)
-    except requests.exceptions.RequestException:
-        return f"<p style='color:#dc2626'>{T[lang]['api_down'].format(url=API_URL)}</p>"
+        res = predictor.predict(payload)
+    except Exception as exc:  # validation / runtime safety net
+        return f"<p style='color:#dc2626'>⚠️ {exc}</p>"
     return _result_html(res, lang)
 
 
@@ -215,15 +236,19 @@ def get_confusion_image():
 
 
 def run_batch(file):
-    """Score every row of an uploaded CSV via the API."""
+    """Score every row of an uploaded CSV in-process."""
     if file is None:
         return pd.DataFrame()
+    predictor = _get_predictor()
+    if predictor is None:
+        return pd.DataFrame([{"error": "Model not trained yet."}])
+
     df = pd.read_csv(file.name)
     out_rows = []
     for _, row in df.iterrows():
         payload = {c: float(row[c]) for c in config.FEATURE_COLUMNS if c in row}
         try:
-            res = _call_predict(payload)
+            res = predictor.predict(payload)
             out_rows.append(
                 {
                     "Amount": payload.get("Amount"),
@@ -232,8 +257,8 @@ def run_batch(file):
                     "decision": res["decision"],
                 }
             )
-        except requests.exceptions.RequestException:
-            out_rows.append({"Amount": payload.get("Amount"), "decision": "API ERROR"})
+        except Exception as exc:
+            out_rows.append({"Amount": payload.get("Amount"), "decision": f"ERROR: {exc}"})
     return pd.DataFrame(out_rows)
 
 
