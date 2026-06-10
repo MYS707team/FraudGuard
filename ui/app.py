@@ -371,6 +371,12 @@ def build_ui() -> gr.Blocks:
 
 
 if __name__ == "__main__":
-    share = os.environ.get("FRAUDGUARD_SHARE", "false").lower() == "true"
+    # Create a public (shareable) URL by default so the app is reachable by
+    # anyone, not just on localhost. Set FRAUDGUARD_SHARE=false to disable.
+    share = os.environ.get("FRAUDGUARD_SHARE", "true").lower() == "true"
     server_port = int(os.environ.get("FRAUDGUARD_UI_PORT", "7860"))
+    print(
+        "Launching FraudGuard UI "
+        f"(share={'on - public URL will be printed below' if share else 'off'}) ..."
+    )
     build_ui().launch(server_name="0.0.0.0", server_port=server_port, share=share)
